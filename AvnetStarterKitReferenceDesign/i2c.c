@@ -1,41 +1,10 @@
-/*
- *  Some of the code in this file was copied from ST Micro.  Below is their required information.
- *
- * @attention
- *
- * <h2><center>&copy; COPYRIGHT(c) 2018 STMicroelectronics</center></h2>
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- *   1. Redistributions of source code must retain the above copyright notice,
- *      this list of conditions and the following disclaimer.
- *   2. Redistributions in binary form must reproduce the above copyright
- *      notice, this list of conditions and the following disclaimer in the
- *      documentation and/or other materials provided with the distribution.
- *   3. Neither the name of STMicroelectronics nor the names of its
- *      contributors may be used to endorse or promote products derived from
- *      this software without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
- * LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- * POSSIBILITY OF SUCH DAMAGE.
- *
- */
-
 #include <errno.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
+#include <curl/curl.h>
 
 // applibs_versions.h defines the API struct versions to use for applibs APIs.
 #include "applibs_versions.h"
@@ -68,6 +37,7 @@ static int accelTimerFd = -1;
 const uint8_t lsm6dsOAddress = LSM6DSO_ADDRESS;     // Addr = 0x6A
 lsm6dso_ctx_t dev_ctx;
 lps22hh_ctx_t pressure_ctx;
+CURL *curl;
 
 //Extern variables
 int i2cFd = -1;
@@ -90,9 +60,76 @@ static int32_t lsm6dso_read_lps22hh_cx(void* ctx, uint8_t reg, uint8_t* data, ui
 void HAL_Delay(int delayTime) {
 	struct timespec ts;
 	ts.tv_sec = 0;
-	ts.tv_nsec = delayTime * 10000;
+	ts.tv_nsec = delayTime * 50000;
 	nanosleep(&ts, NULL);
 }
+
+void reverse(char *str, int len)
+{
+	int i = 0, j = len - 1, temp;
+	while (i < j)
+	{
+		temp = str[i];
+		str[i] = str[j];
+		str[j] = temp;
+		i++; j--;
+	}
+}
+
+int intToStr(int x, char str[], int d)
+{
+	int i = 0;
+	while (x)
+	{
+		str[i++] = (x % 10) + '0';
+		x = x / 10;
+	}
+
+	// If number of digits required is more, then 
+	// add 0s at the beginning 
+	while (i < d)
+		str[i++] = '0';
+
+	reverse(str, i);
+	str[i] = '\0';
+	return i;
+}
+
+void ftoa(float n, char *res, int afterpoint)
+{
+	// Extract integer part 
+	int ipart = (int)n;
+
+	// Extract floating part 
+	float fpart = n - (float)ipart;
+
+	// convert integer part to string 
+	int i = intToStr(ipart, res, 0);
+
+	// check for display option after point 
+	if (afterpoint != 0)
+	{
+		res[i] = '.';  // add dot 
+
+		// Get the value of fraction part upto given no. 
+		// of points after dot. The third parameter is needed 
+		// to handle cases like 233.007 
+		fpart = fpart * pow(10, afterpoint);
+
+		intToStr((int)fpart, res + i + 1, afterpoint);
+	}
+}
+
+
+char* concat(const char *s1, const char *s2)
+{
+	char *result = malloc(strlen(s1) + strlen(s2) + 1); // +1 for the null-terminator
+	// in real code you would check for errors in malloc here
+	strcpy(result, s1);
+	strcat(result, s2);
+	return result;
+}
+
 
 /// <summary>
 ///     Print latest data from on-board sensors.
@@ -114,52 +151,6 @@ void AccelTimerEventHandler(EventData *eventData)
 
 	// Read the sensors on the lsm6dso device
 
-	//Read output only if new xl value is available
-	lsm6dso_xl_flag_data_ready_get(&dev_ctx, &reg);
-	if (reg)
-	{
-		// Read acceleration field data
-		memset(data_raw_acceleration.u8bit, 0x00, 3 * sizeof(int16_t));
-		lsm6dso_acceleration_raw_get(&dev_ctx, data_raw_acceleration.u8bit);
-
-		acceleration_mg[0] = lsm6dso_from_fs4_to_mg(data_raw_acceleration.i16bit[0]);
-		acceleration_mg[1] = lsm6dso_from_fs4_to_mg(data_raw_acceleration.i16bit[1]);
-		acceleration_mg[2] = lsm6dso_from_fs4_to_mg(data_raw_acceleration.i16bit[2]);
-
-		Log_Debug("\nLSM6DSO: Acceleration [mg]  : %.4lf, %.4lf, %.4lf\n",
-			acceleration_mg[0], acceleration_mg[1], acceleration_mg[2]);
-	}
-
-	lsm6dso_gy_flag_data_ready_get(&dev_ctx, &reg);
-	if (reg)
-	{
-		// Read angular rate field data
-		memset(data_raw_angular_rate.u8bit, 0x00, 3 * sizeof(int16_t));
-		lsm6dso_angular_rate_raw_get(&dev_ctx, data_raw_angular_rate.u8bit);
-
-		// Before we store the mdps values subtract the calibration data we captured at startup.
-		angular_rate_dps[0] = (lsm6dso_from_fs2000_to_mdps(data_raw_angular_rate.i16bit[0] - raw_angular_rate_calibration.i16bit[0])) / 1000.0;
-		angular_rate_dps[1] = (lsm6dso_from_fs2000_to_mdps(data_raw_angular_rate.i16bit[1] - raw_angular_rate_calibration.i16bit[1])) / 1000.0;
-		angular_rate_dps[2] = (lsm6dso_from_fs2000_to_mdps(data_raw_angular_rate.i16bit[2] - raw_angular_rate_calibration.i16bit[2])) / 1000.0;
-
-		Log_Debug("LSM6DSO: Angular rate [dps] : %4.2f, %4.2f, %4.2f\r\n",
-			angular_rate_dps[0], angular_rate_dps[1], angular_rate_dps[2]);
-
-	}
-
-	lsm6dso_temp_flag_data_ready_get(&dev_ctx, &reg);
-	if (reg)
-	{
-		// Read temperature data
-		memset(data_raw_temperature.u8bit, 0x00, sizeof(int16_t));
-		lsm6dso_temperature_raw_get(&dev_ctx, data_raw_temperature.u8bit);
-		lsm6dsoTemperature_degC = lsm6dso_from_lsb_to_celsius(data_raw_temperature.i16bit);
-
-		Log_Debug("LSM6DSO: Temperature  [degC]: %.2f\r\n", lsm6dsoTemperature_degC);
-	}
-
-	// Read the sensors on the lsm6dso device
-
 	lps22hh_read_reg(&pressure_ctx, LPS22HH_STATUS, (uint8_t *)&lps22hhReg, 1);
 
 	//Read output only if new value is available
@@ -175,8 +166,33 @@ void AccelTimerEventHandler(EventData *eventData)
 		lps22hh_temperature_raw_get(&pressure_ctx, data_raw_temperature.u8bit);
 		lps22hhTemperature_degC = lps22hh_from_lsb_to_celsius(data_raw_temperature.i16bit);
 
-		Log_Debug("LPS22HH: Pressure     [hPa] : %.2f\r\n", pressure_hPa);
-		Log_Debug("LPS22HH: Temperature  [degC]: %.2f\r\n", lps22hhTemperature_degC);
+		curl = curl_easy_init();
+		if (curl) {
+
+			char Output[7];
+			
+			ftoa(pressure_hPa, Output, 1);
+
+			Log_Debug(Output);
+			Log_Debug("\r\n");
+
+			char* s = concat("http://192.168.1.11:3005?room=main&sensor=preassure&temp=", Output);
+
+			//Log_Debug(s);
+
+			curl_easy_setopt(curl, CURLOPT_URL, s);
+
+			curl_easy_setopt(curl, CURLOPT_HTTPGET, 1L);
+
+			/* Perform the request */
+			curl_easy_perform(curl);
+
+			curl_easy_cleanup(curl);
+
+			free(s);
+		}
+
+		//Log_Debug("LPS22HH: Pressure     [hPa] : %.2f\r\n", pressure_hPa);		
 	}
 
 #if (defined(IOT_CENTRAL_APPLICATION) || defined(IOT_HUB_APPLICATION))

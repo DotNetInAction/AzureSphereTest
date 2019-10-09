@@ -70,7 +70,7 @@
       <AdditionalOptions>-Werror=implicit-function-declaration %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
-      <LibraryDependencies>applibs;pthread;gcc_s;c;azureiot</LibraryDependencies>
+      <LibraryDependencies>applibs;pthread;gcc_s;c;azureiot;curl</LibraryDependencies>
       <AdditionalOptions>-Wl,--no-undefined -nodefaultlibs %(AdditionalOptions)</AdditionalOptions>
     </Link>
   </ItemDefinitionGroup>
